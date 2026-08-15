@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS logs (
+  id BIGSERIAL PRIMARY KEY,
+  timestamp TIMESTAMPTZ NOT NULL,
+  level TEXT NOT NULL,
+  service TEXT NOT NULL,
+  message TEXT NOT NULL,
+  attributes JSONB NOT NULL DEFAULT '{}'::jsonb
+);

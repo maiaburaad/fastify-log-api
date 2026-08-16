@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { pool } from "./db/pool.js";
 import { runMigrations } from "./db/migrate.js";
+import { logsRoutes } from "./routes/logs.js";
 
 const app = Fastify({
     logger: true
@@ -8,7 +9,7 @@ const app = Fastify({
 
 app.get("/health", async (_request, reply) => {
     try {
-        await pool.query("SELECT 1");
+        await pool.query("SELECT 1");  // //Database health check
 
         return {
             status: "ok"
@@ -29,6 +30,8 @@ async function start() {
         await runMigrations();
 
         console.log("Database migrations applied.");
+
+        await app.register(logsRoutes);   //خذ الـ routes الموجودة داخل logsRoutes واعرف عنها.
 
         await app.listen({
             port: 8080,

@@ -1,0 +1,24 @@
+{
+    "logs": [
+        {
+            "timestamp": "2026-08-16T00:00:00Z",
+            "level": "error",
+            "service": "checkout",
+            "message": "payment declined",
+            "attributes": {
+                "user_id": "42",
+                "region": "eu-west",
+                "retries": 3
+            }
+        },
+        {
+            "timestamp": "2026-08-16T00:00:00Z",
+            "level": "critical",
+            "service": "auth",
+            "message": "bad level",
+            "attributes": {
+                "user_id": "99"
+            }
+        }
+    ]
+}

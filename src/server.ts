@@ -2,9 +2,10 @@ import Fastify from "fastify";
 import { pool } from "./db/pool.js";
 import { runMigrations } from "./db/migrate.js";
 import { logsRoutes } from "./routes/logs.js";
+import { startRetentionJob } from "./retention-runner.js";
 
 const app = Fastify({
-    logger: true
+    logger: false
 });
 
 app.get("/health", async (_request, reply) => {
@@ -31,7 +32,9 @@ async function start() {
 
         console.log("Database migrations applied.");
 
-        await app.register(logsRoutes);   //خذ الـ routes الموجودة داخل logsRoutes واعرف عنها.
+        startRetentionJob();
+
+        await app.register(logsRoutes);
 
         await app.listen({
             port: 8080,

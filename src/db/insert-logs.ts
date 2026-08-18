@@ -26,15 +26,15 @@ export async function insertLogs(logs: ValidLog[]): Promise<void> {
     });
 
     const sql = `
-    INSERT INTO logs (
-      timestamp,
-      level,
-      service,
-      message,
-      attributes
-    )
-    VALUES ${placeholders.join(", ")}
-  `;
+        INSERT INTO logs (
+            timestamp,
+            level,
+            service,
+            message,
+            attributes
+        )
+        VALUES ${placeholders.join(", ")}
+    `;
 
     await pool.query(sql, values);
 }

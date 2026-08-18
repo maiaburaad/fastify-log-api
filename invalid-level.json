@@ -1,0 +1,10 @@
+{
+    "logs": [
+        {
+            "timestamp": "2026-08-18T04:00:00Z",
+            "level": "critical",
+            "service": "test-service",
+            "message": "invalid level test"
+        }
+    ]
+}

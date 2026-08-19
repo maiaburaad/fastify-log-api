@@ -26,14 +26,47 @@ export async function insertLogs(logs: ValidLog[]): Promise<void> {
     });
 
     const sql = `
-        INSERT INTO logs (
-            timestamp,
-            level,
-            service,
-            message,
-            attributes
+        WITH inserted AS (
+            INSERT INTO logs (
+                timestamp,
+                level,
+                service,
+                message,
+                attributes
+            )
+            VALUES ${placeholders.join(", ")}
+            RETURNING
+                timestamp,
+                service,
+                level
+        ),
+        rollup_counts AS (
+            SELECT
+                date_trunc('minute', timestamp) AS minute_start,
+                service,
+                level,
+                COUNT(*) AS count
+            FROM inserted
+            GROUP BY
+                date_trunc('minute', timestamp),
+                service,
+                level
         )
-        VALUES ${placeholders.join(", ")}
+        INSERT INTO log_rollups (
+            minute_start,
+            service,
+            level,
+            count
+        )
+        SELECT
+            minute_start,
+            service,
+            level,
+            count
+        FROM rollup_counts
+        ON CONFLICT (minute_start, service, level)
+        DO UPDATE
+        SET count = log_rollups.count + EXCLUDED.count
     `;
 
     await pool.query(sql, values);

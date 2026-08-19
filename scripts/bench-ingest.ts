@@ -1,8 +1,8 @@
 const API_URL = "http://localhost:8080/logs";
 
-const TOTAL_LOGS = 500;
-const BATCH_SIZE = 500;
-const CONCURRENCY = 1;
+const TOTAL_LOGS = 300_000;
+const BATCH_SIZE = 1000;
+const CONCURRENCY = 4;
 
 let nextBatch = 0;
 let accepted = 0;

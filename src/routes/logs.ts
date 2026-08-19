@@ -14,7 +14,7 @@ import {
     type GroupBy
 } from "../db/aggregate-logs.js";
 
-import { updateRollups } from "../db/update-rollups.js";
+
 
 export async function logsRoutes(app: FastifyInstance) {
     app.post("/logs", async (request, reply) => {
@@ -56,7 +56,7 @@ export async function logsRoutes(app: FastifyInstance) {
         }
 
         await insertLogs(accepted);
-        await updateRollups(accepted);
+
 
         return reply.status(200).send({
             accepted: accepted.length,

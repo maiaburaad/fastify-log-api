@@ -20,21 +20,21 @@ export interface AggregateRow {
     count: string;
 }
 
-const MINUTE_MS = 60_000;
+const ROLLUP_BUCKET_MS = 5_000;
 
-function ceilMinute(date: Date): Date {
+function ceilRollupBucket(date: Date): Date {
     const time = date.getTime();
 
     return new Date(
-        Math.ceil(time / MINUTE_MS) * MINUTE_MS
+        Math.ceil(time / ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
     );
 }
 
-function floorMinute(date: Date): Date {
+function floorRollupBucket(date: Date): Date {
     const time = date.getTime();
 
     return new Date(
-        Math.floor(time / MINUTE_MS) * MINUTE_MS
+        Math.floor(time / ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
     );
 }
 
@@ -61,7 +61,7 @@ function getRawBucketExpression(bucket: BucketSize): string {
 function getRollupBucketExpression(bucket: BucketSize): string {
     switch (bucket) {
         case "1m":
-            return "minute_start";
+            return "date_trunc('minute', minute_start)";
 
         case "5m":
             return `
@@ -81,15 +81,13 @@ function getRollupBucketExpression(bucket: BucketSize): string {
 async function aggregateFromRollups(
     filters: AggregateFilters
 ): Promise<AggregateRow[]> {
-    const interiorStart = ceilMinute(filters.since);
-    const interiorEnd = floorMinute(filters.until);
+    const interiorStart =
+        ceilRollupBucket(filters.since);
 
-    /*
-     * إذا الفترة كلها أصغر من دقيقة كاملة،
-     * ما في interior rollup آمنة نستخدمها.
-     *
-     * وقتها نرجع للـraw logs فقط.
-     */
+    const interiorEnd =
+        floorRollupBucket(filters.until);
+
+
     if (interiorEnd.getTime() <= interiorStart.getTime()) {
         return aggregateFromRawLogs(filters);
     }
@@ -97,11 +95,6 @@ async function aggregateFromRollups(
     const values: unknown[] = [];
     const unionParts: string[] = [];
 
-    /*
-     * -------------------------
-     * 1. Interior full minutes
-     * -------------------------
-     */
 
     values.push(interiorStart);
     const interiorStartPlaceholder = `$${values.length}`;
@@ -144,18 +137,6 @@ async function aggregateFromRollups(
             level
     `);
 
-    /*
-     * -------------------------
-     * 2. Left partial minute
-     * -------------------------
-     *
-     * مثال:
-     *
-     * since = 10:30:17
-     *
-     * الـrollup عندها count كاملة للدقيقة 10:30،
-     * لكن إحنا فقط بدنا 10:30:17 -> 10:31:00.
-     */
 
     if (filters.since.getTime() < interiorStart.getTime()) {
         const edgeConditions: string[] = [];
@@ -188,33 +169,27 @@ async function aggregateFromRollups(
 
         unionParts.push(`
             SELECT
-                date_trunc('minute', timestamp) AS minute_start,
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ) AS minute_start,
                 service,
                 level,
                 COUNT(*) AS count
             FROM logs
             WHERE ${edgeConditions.join(" AND ")}
             GROUP BY
-                date_trunc('minute', timestamp),
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ),
                 service,
                 level
         `);
     }
 
-    /*
-     * -------------------------
-     * 3. Right partial minute
-     * -------------------------
-     *
-     * مثال:
-     *
-     * until = 10:42:38
-     *
-     * ما بنستخدم count كاملة لدقيقة 10:42.
-     * بنقرأ فقط:
-     *
-     * 10:42:00 -> 10:42:38
-     */
 
     if (interiorEnd.getTime() < filters.until.getTime()) {
         const edgeConditions: string[] = [];
@@ -247,14 +222,22 @@ async function aggregateFromRollups(
 
         unionParts.push(`
             SELECT
-                date_trunc('minute', timestamp) AS minute_start,
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ) AS minute_start,
                 service,
                 level,
                 COUNT(*) AS count
             FROM logs
             WHERE ${edgeConditions.join(" AND ")}
             GROUP BY
-                date_trunc('minute', timestamp),
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ),
                 service,
                 level
         `);
@@ -280,22 +263,20 @@ async function aggregateFromRollups(
     }
 
     const sql = `
-        WITH minute_counts AS (
+        WITH rollup_parts AS (
             ${unionParts.join("\nUNION ALL\n")}
         )
         SELECT
             ${bucketExpression} AS start,
             ${groupExpression} AS "group",
             SUM(count) AS count
-        FROM minute_counts
+        FROM rollup_parts
         GROUP BY ${groupByParts.join(", ")}
         ORDER BY start ASC
     `;
 
-    const result = await pool.query<AggregateRow>(
-        sql,
-        values
-    );
+    const result =
+        await pool.query<AggregateRow>(sql, values);
 
     return result.rows;
 }
@@ -376,10 +357,8 @@ async function aggregateFromRawLogs(
         ORDER BY start ASC
     `;
 
-    const result = await pool.query<AggregateRow>(
-        sql,
-        values
-    );
+    const result =
+        await pool.query<AggregateRow>(sql, values);
 
     return result.rows;
 }
@@ -391,10 +370,6 @@ export async function aggregateLogs(
         filters.attributes !== undefined &&
         Object.keys(filters.attributes).length > 0;
 
-    /*
-     * Rollup لا تحتوي message أو attributes.
-     * لذلك هذه الحالات لازم تظل raw.
-     */
     const needsRawLogs =
         filters.q !== undefined ||
         hasAttributeFilters;

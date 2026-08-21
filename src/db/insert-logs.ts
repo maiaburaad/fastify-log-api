@@ -54,13 +54,21 @@ export async function insertLogs(logs: ValidLog[]): Promise<void> {
         ),
         rollup_counts AS (
             SELECT
-                date_trunc('minute', timestamp) AS minute_start,
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ) AS minute_start,
                 service,
                 level,
                 COUNT(*) AS count
             FROM inserted
             GROUP BY
-                date_trunc('minute', timestamp),
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ),
                 service,
                 level
         )

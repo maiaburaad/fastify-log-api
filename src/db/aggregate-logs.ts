@@ -20,6 +20,24 @@ export interface AggregateRow {
     count: string;
 }
 
+const MINUTE_MS = 60_000;
+
+function ceilMinute(date: Date): Date {
+    const time = date.getTime();
+
+    return new Date(
+        Math.ceil(time / MINUTE_MS) * MINUTE_MS
+    );
+}
+
+function floorMinute(date: Date): Date {
+    const time = date.getTime();
+
+    return new Date(
+        Math.floor(time / MINUTE_MS) * MINUTE_MS
+    );
+}
+
 function getRawBucketExpression(bucket: BucketSize): string {
     switch (bucket) {
         case "1m":
@@ -63,23 +81,183 @@ function getRollupBucketExpression(bucket: BucketSize): string {
 async function aggregateFromRollups(
     filters: AggregateFilters
 ): Promise<AggregateRow[]> {
-    const conditions: string[] = [];
+    const interiorStart = ceilMinute(filters.since);
+    const interiorEnd = floorMinute(filters.until);
+
+    /*
+     * إذا الفترة كلها أصغر من دقيقة كاملة،
+     * ما في interior rollup آمنة نستخدمها.
+     *
+     * وقتها نرجع للـraw logs فقط.
+     */
+    if (interiorEnd.getTime() <= interiorStart.getTime()) {
+        return aggregateFromRawLogs(filters);
+    }
+
     const values: unknown[] = [];
+    const unionParts: string[] = [];
 
-    values.push(filters.since);
-    conditions.push(`minute_start >= $${values.length}`);
+    /*
+     * -------------------------
+     * 1. Interior full minutes
+     * -------------------------
+     */
 
-    values.push(filters.until);
-    conditions.push(`minute_start < $${values.length}`);
+    values.push(interiorStart);
+    const interiorStartPlaceholder = `$${values.length}`;
+
+    values.push(interiorEnd);
+    const interiorEndPlaceholder = `$${values.length}`;
+
+    const rollupConditions: string[] = [
+        `minute_start >= ${interiorStartPlaceholder}`,
+        `minute_start < ${interiorEndPlaceholder}`
+    ];
 
     if (filters.service !== undefined) {
         values.push(filters.service);
-        conditions.push(`service = $${values.length}`);
+
+        rollupConditions.push(
+            `service = $${values.length}`
+        );
     }
 
     if (filters.level !== undefined) {
         values.push(filters.level);
-        conditions.push(`level = $${values.length}`);
+
+        rollupConditions.push(
+            `level = $${values.length}`
+        );
+    }
+
+    unionParts.push(`
+        SELECT
+            minute_start,
+            service,
+            level,
+            SUM(count) AS count
+        FROM log_rollups
+        WHERE ${rollupConditions.join(" AND ")}
+        GROUP BY
+            minute_start,
+            service,
+            level
+    `);
+
+    /*
+     * -------------------------
+     * 2. Left partial minute
+     * -------------------------
+     *
+     * مثال:
+     *
+     * since = 10:30:17
+     *
+     * الـrollup عندها count كاملة للدقيقة 10:30،
+     * لكن إحنا فقط بدنا 10:30:17 -> 10:31:00.
+     */
+
+    if (filters.since.getTime() < interiorStart.getTime()) {
+        const edgeConditions: string[] = [];
+
+        values.push(filters.since);
+        edgeConditions.push(
+            `timestamp >= $${values.length}`
+        );
+
+        values.push(interiorStart);
+        edgeConditions.push(
+            `timestamp < $${values.length}`
+        );
+
+        if (filters.service !== undefined) {
+            values.push(filters.service);
+
+            edgeConditions.push(
+                `service = $${values.length}`
+            );
+        }
+
+        if (filters.level !== undefined) {
+            values.push(filters.level);
+
+            edgeConditions.push(
+                `level = $${values.length}`
+            );
+        }
+
+        unionParts.push(`
+            SELECT
+                date_trunc('minute', timestamp) AS minute_start,
+                service,
+                level,
+                COUNT(*) AS count
+            FROM logs
+            WHERE ${edgeConditions.join(" AND ")}
+            GROUP BY
+                date_trunc('minute', timestamp),
+                service,
+                level
+        `);
+    }
+
+    /*
+     * -------------------------
+     * 3. Right partial minute
+     * -------------------------
+     *
+     * مثال:
+     *
+     * until = 10:42:38
+     *
+     * ما بنستخدم count كاملة لدقيقة 10:42.
+     * بنقرأ فقط:
+     *
+     * 10:42:00 -> 10:42:38
+     */
+
+    if (interiorEnd.getTime() < filters.until.getTime()) {
+        const edgeConditions: string[] = [];
+
+        values.push(interiorEnd);
+        edgeConditions.push(
+            `timestamp >= $${values.length}`
+        );
+
+        values.push(filters.until);
+        edgeConditions.push(
+            `timestamp < $${values.length}`
+        );
+
+        if (filters.service !== undefined) {
+            values.push(filters.service);
+
+            edgeConditions.push(
+                `service = $${values.length}`
+            );
+        }
+
+        if (filters.level !== undefined) {
+            values.push(filters.level);
+
+            edgeConditions.push(
+                `level = $${values.length}`
+            );
+        }
+
+        unionParts.push(`
+            SELECT
+                date_trunc('minute', timestamp) AS minute_start,
+                service,
+                level,
+                COUNT(*) AS count
+            FROM logs
+            WHERE ${edgeConditions.join(" AND ")}
+            GROUP BY
+                date_trunc('minute', timestamp),
+                service,
+                level
+        `);
     }
 
     const bucketExpression =
@@ -102,17 +280,22 @@ async function aggregateFromRollups(
     }
 
     const sql = `
+        WITH minute_counts AS (
+            ${unionParts.join("\nUNION ALL\n")}
+        )
         SELECT
             ${bucketExpression} AS start,
             ${groupExpression} AS "group",
             SUM(count) AS count
-        FROM log_rollups
-        WHERE ${conditions.join(" AND ")}
+        FROM minute_counts
         GROUP BY ${groupByParts.join(", ")}
         ORDER BY start ASC
     `;
 
-    const result = await pool.query<AggregateRow>(sql, values);
+    const result = await pool.query<AggregateRow>(
+        sql,
+        values
+    );
 
     return result.rows;
 }
@@ -141,11 +324,16 @@ async function aggregateFromRawLogs(
 
     if (filters.q !== undefined) {
         values.push(`%${filters.q}%`);
-        conditions.push(`message ILIKE $${values.length}`);
+        conditions.push(
+            `message ILIKE $${values.length}`
+        );
     }
 
     if (filters.attributes !== undefined) {
-        for (const [key, value] of Object.entries(filters.attributes)) {
+        for (
+            const [key, value]
+            of Object.entries(filters.attributes)
+        ) {
             values.push(key);
             const keyPlaceholder = `$${values.length}`;
 
@@ -188,7 +376,10 @@ async function aggregateFromRawLogs(
         ORDER BY start ASC
     `;
 
-    const result = await pool.query<AggregateRow>(sql, values);
+    const result = await pool.query<AggregateRow>(
+        sql,
+        values
+    );
 
     return result.rows;
 }
@@ -200,6 +391,10 @@ export async function aggregateLogs(
         filters.attributes !== undefined &&
         Object.keys(filters.attributes).length > 0;
 
+    /*
+     * Rollup لا تحتوي message أو attributes.
+     * لذلك هذه الحالات لازم تظل raw.
+     */
     const needsRawLogs =
         filters.q !== undefined ||
         hasAttributeFilters;

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { validateLogEntry } from "../schemas/log.js";
-import { insertLogs } from "../db/insert-logs.js";
+import { coalescedInsertLogs } from "../db/ingest-coalescer.js";
 import { queryLogs } from "../db/query-logs.js";
 import { LOG_LEVELS, type LogLevel } from "../schemas/log.js";
 import {
@@ -55,8 +55,7 @@ export async function logsRoutes(app: FastifyInstance) {
             });
         }
 
-        await insertLogs(accepted);
-
+        await coalescedInsertLogs(accepted);
 
         return reply.status(200).send({
             accepted: accepted.length,

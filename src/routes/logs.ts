@@ -1,8 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { validateLogEntry } from "../schemas/log.js";
-import { coalescedInsertLogs } from "../db/ingest-coalescer.js";
+import {
+    BackpressureError,
+    coalescedInsertLogs
+} from "../db/ingest-coalescer.js";
 import { queryLogs } from "../db/query-logs.js";
 import { LOG_LEVELS, type LogLevel } from "../schemas/log.js";
+import { isRateLimited } from "../rate-limit.js";
+
 import {
     decodeCursor,
     encodeCursor
@@ -15,9 +20,18 @@ import {
 } from "../db/aggregate-logs.js";
 
 
-
 export async function logsRoutes(app: FastifyInstance) {
     app.post("/logs", async (request, reply) => {
+        // Optional rate limiting.
+        // Disabled by default unless RATE_LIMIT_REQUESTS_PER_SECOND is configured.
+        if (isRateLimited()) {
+            reply.header("Retry-After", "1");
+
+            return reply.status(429).send({
+                error: "too many requests"
+            });
+        }
+
         const body = request.body;
 
         if (
@@ -28,7 +42,7 @@ export async function logsRoutes(app: FastifyInstance) {
             !Array.isArray(body.logs)
         ) {
             return reply.status(400).send({
-                error: "request body must contain a logs array"  //Return 400 when top-level structure is invalid.
+                error: "request body must contain a logs array"
             });
         }
 
@@ -55,14 +69,25 @@ export async function logsRoutes(app: FastifyInstance) {
             });
         }
 
-        await coalescedInsertLogs(accepted);
+        try {
+            await coalescedInsertLogs(accepted);
+        } catch (error) {
+            if (error instanceof BackpressureError) {
+                reply.header("Retry-After", "1");
+
+                return reply.status(503).send({
+                    error: "service temporarily overloaded"
+                });
+            }
+
+            throw error;
+        }
 
         return reply.status(200).send({
             accepted: accepted.length,
             rejected
         });
     });
-
 
 
     app.get("/logs", async (request, reply) => {

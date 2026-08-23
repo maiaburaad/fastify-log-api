@@ -957,6 +957,15 @@ fastify-log-api/
 The route layer now focuses on HTTP concerns, while query parsing and validation live under `src/validation/`. Test payloads used during manual verification are kept separately under `tests/fixtures/`.
 
 ---
+# Known Limitations
+
+- Benchmark scores depend on host-machine speed and generator capacity; results should be compared only with similar environments.
+- The optional rate limiter is in-memory and intended for the single-instance deployment used by this project.
+- Rollups accelerate common service/level/time aggregation paths; queries using `q` or `attr.<key>` fall back to the raw `logs` table.
+- `log_rollups` is derived state; PostgreSQL raw logs remain the source of truth.
+- The project is optimized for the evaluator's single-node Docker Compose environment rather than a distributed multi-instance deployment.
+
+------
 
 # Engineering Takeaways
 

@@ -134,6 +134,8 @@ flowchart TB
 
 The raw `logs` table remains authoritative. `log_rollups` is a derived acceleration structure used to make common aggregation queries cheap.
 
+Query parsing and validation are separated from the HTTP route layer, keeping `routes/logs.ts` focused on request orchestration and response handling.
+
 ---
 
 # Data Model
@@ -616,6 +618,8 @@ ORDER BY timestamp DESC, id DESC
 
 Cursor comparisons use the same pair, producing deterministic pagination without deep `OFFSET` scans.
 
+Query parsing and validation for this endpoint are handled separately in `src/validation/log-query.ts`, keeping the HTTP route focused on orchestration.
+
 ---
 
 ## GET `/logs/aggregate`
@@ -639,6 +643,8 @@ group_by = service | level
 ```
 
 Buckets are returned in ascending time order.
+
+Aggregation query parsing and validation are handled in `src/validation/aggregate-query.ts`.
 
 ---
 
@@ -906,6 +912,11 @@ fastify-log-api/
 ├── scripts/
 │   ├── bench-concurrent.ts
 │   └── bench-ingest.ts
+├── tests/
+│   └── fixtures/
+│       ├── empty-batch.json
+│       ├── invalid-level.json
+│       └── test-log.json
 ├── src/
 │   ├── db/
 │   │   ├── migrations/
@@ -927,6 +938,9 @@ fastify-log-api/
 │   │   └── logs.ts
 │   ├── schemas/
 │   │   └── log.ts
+│   ├── validation/
+│   │   ├── aggregate-query.ts
+│   │   └── log-query.ts
 │   ├── utils/
 │   │   └── cursor.ts
 │   ├── rate-limit.ts
@@ -934,10 +948,13 @@ fastify-log-api/
 │   └── server.ts
 ├── Dockerfile
 ├── docker-compose.yml
+├── benchmark-report.json
 ├── benchmark-report-linux.json
 ├── package.json
 └── tsconfig.json
 ```
+
+The route layer now focuses on HTTP concerns, while query parsing and validation live under `src/validation/`. Test payloads used during manual verification are kept separately under `tests/fixtures/`.
 
 ---
 
@@ -958,6 +975,14 @@ The major improvements targeted database round trips, hot-row contention, aggreg
 Correctness remained **15/15** while the architecture changed.
 
 Pagination stability, aggregate correctness, durable acknowledgement, and retention consistency were not traded away for speed.
+
+### Separate Responsibilities
+
+The final refactor moved GET query parsing and validation out of the HTTP route layer.
+
+`routes/logs.ts` now concentrates on request orchestration and response handling, while `validation/log-query.ts` and `validation/aggregate-query.ts` own query validation concerns.
+
+This keeps the route layer easier to read and maintain without changing the API contract.
 
 ### Keep Failed Experiments
 

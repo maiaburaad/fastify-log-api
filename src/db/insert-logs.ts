@@ -1,6 +1,10 @@
 import type { ValidLog } from "../schemas/log.js";
 import { pool } from "./pool.js";
 
+const ROLLUP_SHARDS = 16;
+
+let nextShard = 0;
+
 export async function insertLogs(logs: ValidLog[]): Promise<void> {
     if (logs.length === 0) {
         return;
@@ -25,6 +29,14 @@ export async function insertLogs(logs: ValidLog[]): Promise<void> {
         );
     });
 
+    const shard = nextShard;
+
+    nextShard = (nextShard + 1) % ROLLUP_SHARDS;
+
+    values.push(shard);
+
+    const shardPlaceholder = `$${values.length}`;
+
     const sql = `
         WITH inserted AS (
             INSERT INTO logs (
@@ -42,13 +54,21 @@ export async function insertLogs(logs: ValidLog[]): Promise<void> {
         ),
         rollup_counts AS (
             SELECT
-                date_trunc('minute', timestamp) AS minute_start,
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ) AS minute_start,
                 service,
                 level,
                 COUNT(*) AS count
             FROM inserted
             GROUP BY
-                date_trunc('minute', timestamp),
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ),
                 service,
                 level
         )
@@ -56,15 +76,22 @@ export async function insertLogs(logs: ValidLog[]): Promise<void> {
             minute_start,
             service,
             level,
+            shard,
             count
         )
         SELECT
             minute_start,
             service,
             level,
+            ${shardPlaceholder}::smallint,
             count
         FROM rollup_counts
-        ON CONFLICT (minute_start, service, level)
+        ON CONFLICT (
+            minute_start,
+            service,
+            level,
+            shard
+        )
         DO UPDATE
         SET count = log_rollups.count + EXCLUDED.count
     `;

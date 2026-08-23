@@ -20,6 +20,24 @@ export interface AggregateRow {
     count: string;
 }
 
+const ROLLUP_BUCKET_MS = 5_000;
+
+function ceilRollupBucket(date: Date): Date {
+    const time = date.getTime();
+
+    return new Date(
+        Math.ceil(time / ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
+    );
+}
+
+function floorRollupBucket(date: Date): Date {
+    const time = date.getTime();
+
+    return new Date(
+        Math.floor(time / ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS
+    );
+}
+
 function getRawBucketExpression(bucket: BucketSize): string {
     switch (bucket) {
         case "1m":
@@ -43,7 +61,7 @@ function getRawBucketExpression(bucket: BucketSize): string {
 function getRollupBucketExpression(bucket: BucketSize): string {
     switch (bucket) {
         case "1m":
-            return "minute_start";
+            return "date_trunc('minute', minute_start)";
 
         case "5m":
             return `
@@ -63,23 +81,166 @@ function getRollupBucketExpression(bucket: BucketSize): string {
 async function aggregateFromRollups(
     filters: AggregateFilters
 ): Promise<AggregateRow[]> {
-    const conditions: string[] = [];
+    const interiorStart =
+        ceilRollupBucket(filters.since);
+
+    const interiorEnd =
+        floorRollupBucket(filters.until);
+
+
+    if (interiorEnd.getTime() <= interiorStart.getTime()) {
+        return aggregateFromRawLogs(filters);
+    }
+
     const values: unknown[] = [];
+    const unionParts: string[] = [];
 
-    values.push(filters.since);
-    conditions.push(`minute_start >= $${values.length}`);
 
-    values.push(filters.until);
-    conditions.push(`minute_start < $${values.length}`);
+    values.push(interiorStart);
+    const interiorStartPlaceholder = `$${values.length}`;
+
+    values.push(interiorEnd);
+    const interiorEndPlaceholder = `$${values.length}`;
+
+    const rollupConditions: string[] = [
+        `minute_start >= ${interiorStartPlaceholder}`,
+        `minute_start < ${interiorEndPlaceholder}`
+    ];
 
     if (filters.service !== undefined) {
         values.push(filters.service);
-        conditions.push(`service = $${values.length}`);
+
+        rollupConditions.push(
+            `service = $${values.length}`
+        );
     }
 
     if (filters.level !== undefined) {
         values.push(filters.level);
-        conditions.push(`level = $${values.length}`);
+
+        rollupConditions.push(
+            `level = $${values.length}`
+        );
+    }
+
+    unionParts.push(`
+        SELECT
+            minute_start,
+            service,
+            level,
+            SUM(count) AS count
+        FROM log_rollups
+        WHERE ${rollupConditions.join(" AND ")}
+        GROUP BY
+            minute_start,
+            service,
+            level
+    `);
+
+
+    if (filters.since.getTime() < interiorStart.getTime()) {
+        const edgeConditions: string[] = [];
+
+        values.push(filters.since);
+        edgeConditions.push(
+            `timestamp >= $${values.length}`
+        );
+
+        values.push(interiorStart);
+        edgeConditions.push(
+            `timestamp < $${values.length}`
+        );
+
+        if (filters.service !== undefined) {
+            values.push(filters.service);
+
+            edgeConditions.push(
+                `service = $${values.length}`
+            );
+        }
+
+        if (filters.level !== undefined) {
+            values.push(filters.level);
+
+            edgeConditions.push(
+                `level = $${values.length}`
+            );
+        }
+
+        unionParts.push(`
+            SELECT
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ) AS minute_start,
+                service,
+                level,
+                COUNT(*) AS count
+            FROM logs
+            WHERE ${edgeConditions.join(" AND ")}
+            GROUP BY
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ),
+                service,
+                level
+        `);
+    }
+
+
+    if (interiorEnd.getTime() < filters.until.getTime()) {
+        const edgeConditions: string[] = [];
+
+        values.push(interiorEnd);
+        edgeConditions.push(
+            `timestamp >= $${values.length}`
+        );
+
+        values.push(filters.until);
+        edgeConditions.push(
+            `timestamp < $${values.length}`
+        );
+
+        if (filters.service !== undefined) {
+            values.push(filters.service);
+
+            edgeConditions.push(
+                `service = $${values.length}`
+            );
+        }
+
+        if (filters.level !== undefined) {
+            values.push(filters.level);
+
+            edgeConditions.push(
+                `level = $${values.length}`
+            );
+        }
+
+        unionParts.push(`
+            SELECT
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ) AS minute_start,
+                service,
+                level,
+                COUNT(*) AS count
+            FROM logs
+            WHERE ${edgeConditions.join(" AND ")}
+            GROUP BY
+                date_bin(
+                    '5 seconds',
+                    timestamp,
+                    TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                ),
+                service,
+                level
+        `);
     }
 
     const bucketExpression =
@@ -102,17 +263,20 @@ async function aggregateFromRollups(
     }
 
     const sql = `
+        WITH rollup_parts AS (
+            ${unionParts.join("\nUNION ALL\n")}
+        )
         SELECT
             ${bucketExpression} AS start,
             ${groupExpression} AS "group",
             SUM(count) AS count
-        FROM log_rollups
-        WHERE ${conditions.join(" AND ")}
+        FROM rollup_parts
         GROUP BY ${groupByParts.join(", ")}
         ORDER BY start ASC
     `;
 
-    const result = await pool.query<AggregateRow>(sql, values);
+    const result =
+        await pool.query<AggregateRow>(sql, values);
 
     return result.rows;
 }
@@ -141,11 +305,16 @@ async function aggregateFromRawLogs(
 
     if (filters.q !== undefined) {
         values.push(`%${filters.q}%`);
-        conditions.push(`message ILIKE $${values.length}`);
+        conditions.push(
+            `message ILIKE $${values.length}`
+        );
     }
 
     if (filters.attributes !== undefined) {
-        for (const [key, value] of Object.entries(filters.attributes)) {
+        for (
+            const [key, value]
+            of Object.entries(filters.attributes)
+        ) {
             values.push(key);
             const keyPlaceholder = `$${values.length}`;
 
@@ -188,7 +357,8 @@ async function aggregateFromRawLogs(
         ORDER BY start ASC
     `;
 
-    const result = await pool.query<AggregateRow>(sql, values);
+    const result =
+        await pool.query<AggregateRow>(sql, values);
 
     return result.rows;
 }

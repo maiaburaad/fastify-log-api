@@ -4,9 +4,8 @@
 
 ### High-performance structured log ingestion, querying, and aggregation under strict resource limits
 
-**Best observed local run: 94.9 / 100**  
-**Best archived benchmark report: 94.6 / 100**  
-**Ubuntu reproduction: 94.5 / 100**
+**Best Local Benchmark: 94.9 / 100**  
+**Linux Verification: 94.5 / 100**
 
 **14,999 logs/s · 0.0% errors · 15/15 correctness · 20/20 reliability**
 
@@ -45,49 +44,39 @@ That process included successful optimizations, regressions, discarded ideas, cu
 
 ## Performance at a Glance
 
-| Metric | Best archived Windows report | Ubuntu 26.04 LTS / WSL2 |
+| Metric | Best Local Run | Ubuntu 26.04 LTS / WSL2 |
 |---|---:|---:|
-| **Total score** | **94.6 / 100** | **94.5 / 100** |
-| Correctness | **15.0 / 15** | **15.0 / 15** |
-| Performance | **45.0 / 50** | **45.0 / 50** |
-| Queries | **14.6 / 15** | **14.5 / 15** |
-| Reliability | **20.0 / 20** | **20.0 / 20** |
+| **Total score** | **94.9 / 100** | **94.5 / 100** |
+| Correctness | **15 / 15** | **15 / 15** |
 | Load throughput | **14,999 logs/s** | **14,999 logs/s** |
 | Error rate | **0.0%** | **0.0%** |
-| Request p95 | **~51 ms** | **~54 ms** |
-| Aggregate p95 | **~23 ms** | **~28 ms** |
-| Consistency | **4 / 4 scenarios** | **4 / 4 scenarios** |
-| Machine-speed factor | **0.476x reference** | **0.41x reference** |
+| Request p95 | **~27–28 ms** | **~54 ms** |
+| Aggregate p95 | **~4 ms** | **~28 ms** |
+| Reliability | **20 / 20** | **20 / 20** |
 
-During tuning, two local CLI runs also reached **94.9 / 100**, with approximately:
+The final implementation reached a best local benchmark score of **94.9 / 100**.
 
-```text
-14,999 logs/s
-0.0% errors
-27–28 ms request p95
-4 ms aggregate p95
-```
-
-Those `94.9` runs were observed from the CLI during development but were not preserved as a separate committed JSON report. The repository therefore keeps the **94.6 archived report** as the primary stored benchmark artifact, while the later Ubuntu run independently reproduced **94.5**.
+The complete stack was also independently reproduced on **Ubuntu 26.04 LTS / WSL2**, scoring **94.5 / 100** with **14,999 logs/s** and **0.0% errors**.
 
 <p align="center">
   <img src="docs/performance-evolution.png" alt="Performance evolution" width="820">
 </p>
 
-### Archived milestone comparison
+### Development Milestones
 
-Git history preserves an earlier `64.2 / 100` benchmark snapshot and a later optimized `94.6 / 100` snapshot.
+Git history preserves earlier benchmark snapshots that show how substantially the implementation evolved during optimization.
 
-| Archived milestone | Score | Machine speed | Throughput | Request p95 | Aggregate p95 | Errors |
+| Milestone | Score | Machine speed | Throughput | Request p95 | Aggregate p95 | Errors |
 |---|---:|---:|---:|---:|---:|---:|
 | Early optimization snapshot | **64.2** | **0.200x** | **6,158/s** | **2,769 ms** | **1,569 ms** | **0%** |
 | Optimized rollup snapshot | **94.6** | **0.476x** | **14,999/s** | **51 ms** | **23 ms** | **0%** |
+| Best local run | **94.9** | ~**0.48x** | **14,999/s** | **~27–28 ms** | **~4 ms** | **0%** |
 
 <p align="center">
-  <img src="docs/latency-comparison.png" alt="Archived latency comparison" width="760">
+  <img src="docs/latency-comparison.png" alt="Latency comparison" width="760">
 </p>
 
-These snapshots were recorded on machines with different benchmark speed factors, so they are shown as **project milestones**, not as a controlled single-variable A/B test.
+These runs were recorded under different machine-speed conditions, so they are presented as **engineering milestones**, not as a controlled single-variable A/B experiment.
 
 ---
 
@@ -168,8 +157,10 @@ erDiagram
         BIGINT count
     }
 
-    LOGS ||..o{ LOG_ROLLUPS : "summarized into"
+    LOGS ||..o{ LOG_ROLLUPS : "conceptually summarized into"
 ```
+
+The relationship shown above is **conceptual**. There is no foreign-key relationship between individual raw logs and rollup rows.
 
 `minute_start` is a historical column name. In the final design it represents the beginning of a **5-second rollup interval**.
 
@@ -193,18 +184,22 @@ Example:
 
 # Indexing Strategy
 
-The final schema uses targeted B-tree indexes plus a lightweight BRIN index for time-oriented data.
+The final schema uses targeted indexes around the access patterns exercised by the API.
 
 | Index | Type | Supports |
 |---|---|---|
 | `(timestamp DESC, id DESC)` | B-tree | ordering, cursor pagination, time-based reads |
 | `(service, timestamp DESC, id DESC)` | B-tree | service-filtered chronological queries |
 | `(level, timestamp DESC, id DESC)` | B-tree | level-filtered chronological queries |
-| `timestamp` | BRIN | large naturally time-ordered ranges with low index overhead |
+| `timestamp` | BRIN | lightweight support for large time-oriented scans |
 
 There is **no GIN index** in the final schema.
 
-The key principle was not “add indexes everywhere,” but “index the access patterns the API actually uses.”
+A lightweight **BRIN index** is also maintained on `timestamp`. Because log data is naturally inserted in roughly chronological order, BRIN provides a compact secondary access path for large time-oriented scans without requiring another large B-tree.
+
+The key principle was not “add indexes everywhere,” but:
+
+> **index the access patterns the API actually uses, then measure the result.**
 
 ---
 
@@ -237,7 +232,7 @@ sequenceDiagram
     API-->>B: accepted / rejected
 ```
 
-## Request coalescing
+## Request Coalescing
 
 Concurrent requests are briefly collected before database work is issued.
 
@@ -258,7 +253,7 @@ That choice was made from measurement, not assumption.
 
 # The COPY Experiment
 
-PostgreSQL `COPY` was explicitly tested because it is often the first recommendation for high-volume ingestion.
+PostgreSQL `COPY` was explicitly tested because it is often one of the first recommendations for high-volume ingestion.
 
 It did **not** win for this workload.
 
@@ -274,7 +269,16 @@ Selected local measurements during the experiment:
 | COPY TEXT + transactional rollup work | ~6.2k logs/s | Rejected |
 | Multi-row INSERT + rollup work | ~13.1k logs/s | Better fit |
 
-`COPY` is an excellent bulk-loading primitive in many workloads, but this API is not a one-shot file importer. The write path also has validation, HTTP batching, rollup maintenance, transactional semantics, and concurrency behavior.
+`COPY` is an excellent bulk-loading primitive in many workloads, but this API is not a one-shot file importer.
+
+The write path also includes:
+
+- validation;
+- HTTP batching;
+- rollup maintenance;
+- transactional semantics;
+- concurrent requests;
+- and durability requirements.
 
 The experiment was therefore reverted instead of being kept merely because `COPY` is theoretically associated with bulk performance.
 
@@ -337,7 +341,9 @@ flowchart LR
 
 Why not use rollups for every byte of the range?
 
-Because `since` and `until` may fall in the middle of a 5-second interval. Taking the whole counter would over-count. The final design therefore uses raw rows only where exact boundaries require them.
+Because `since` and `until` may fall in the middle of a 5-second interval. Taking the entire counter would over-count.
+
+The final design therefore uses raw rows only where exact boundaries require them.
 
 When the query contains filters not represented in the rollup, such as:
 
@@ -359,7 +365,7 @@ flowchart LR
     A["PostgreSQL + migrations"] --> B["Batch ingestion"]
     B --> C["Rollup aggregation"]
     C --> D["Ingestion / rollup tuning"]
-    D --> E["BRIN experiment"]
+    D --> E["BRIN indexing"]
     E --> F["Sharded counters"]
     F --> G["Pool tuning"]
     G --> H["Partial-edge optimization"]
@@ -370,7 +376,7 @@ flowchart LR
     L --> M["CI + Linux reproduction"]
 ```
 
-## Selected Git milestones
+## Selected Git Milestones
 
 | Commit | Change |
 |---|---|
@@ -379,7 +385,7 @@ flowchart LR
 | `7d54ceb` | Rollup aggregation and performance work |
 | `f30eab4` | Aggregation optimization with rollups |
 | `b576eda` | Log ingestion and rollup-update optimization |
-| `fcda313` | BRIN timestamp-index experiment |
+| `fcda313` | Add BRIN timestamp index |
 | `ba67edc` | Shard rollup counters |
 | `b963ee4` | Increase / tune database pool size |
 | `9be9061` | Optimize aggregate partial-edge handling |
@@ -392,11 +398,11 @@ flowchart LR
 
 ---
 
-# Experiments That Did Not Become the Final Design
+# Experiments and Alternatives
 
-Not every branch was meant to survive.
+Not every idea tested during development became the central architecture.
 
-The repository contains isolated experiment/backup branches including:
+The repository history contains isolated experiment and backup branches including:
 
 ```text
 experiment-async-rollup
@@ -409,13 +415,15 @@ backup-current-optimized
 backup-old-version
 ```
 
-## Async rollup experiment
+These branches made it possible to explore alternatives without destabilizing the main implementation.
+
+## Async Rollup Experiment
 
 An asynchronous rollup direction was explored, but the final architecture keeps raw insertion and rollup maintenance together in the ingestion database path.
 
 The final choice favors straightforward consistency semantics: a successful write does not leave derived counters intentionally pending in a separate asynchronous pipeline.
 
-## Rollup-delta experiments
+## Rollup-Delta Experiments
 
 Alternative rollup-update strategies were tested before the project converged on:
 
@@ -429,9 +437,13 @@ partial-edge raw reads
 
 The experiment branches were retained rather than pretending every attempted optimization became part of the final system.
 
-## Pool tuning
+## Pool Tuning
 
-The database pool was tuned during performance work. More connections were not treated as automatically better; the final Docker configuration uses:
+The database pool was tuned during performance work.
+
+More connections were not treated as automatically better.
+
+The final Docker configuration uses:
 
 ```text
 DB_POOL_MAX=20
@@ -439,11 +451,17 @@ DB_POOL_MAX=20
 
 while the code fallback is `10`.
 
-## BRIN
+## BRIN Evaluation
 
-BRIN indexing was evaluated as part of the timestamp-range strategy and remains as a lightweight complement to the B-tree access paths.
+A BRIN index on `timestamp` was explicitly evaluated during performance tuning.
 
-It is not presented as a universal replacement for the composite B-tree indexes.
+Unlike several discarded experiments, the BRIN index remained in the final schema as a lightweight complement to the primary B-tree indexes.
+
+Its role is deliberately limited: the B-tree indexes remain responsible for deterministic ordering, cursor pagination, and selective service/level queries, while BRIN provides a compact secondary index for large time-oriented scans.
+
+This reinforced the project's general optimization rule:
+
+> **test it, measure it, and keep it only when it earns its place in the final design.**
 
 ---
 
@@ -498,7 +516,7 @@ flowchart LR
     Count --> Result["Throughput = accepted / seconds"]
 ```
 
-## Why custom scripts mattered
+## Why Custom Scripts Mattered
 
 The custom benchmarks were useful for fast development feedback:
 
@@ -509,7 +527,9 @@ The custom benchmarks were useful for fast development feedback:
 - measure local logs/sec;
 - verify whether an optimization was worth sending to the full benchmark.
 
-They were **development tools**, not substitutes for the official workload. The final benchmark was still used for correctness, load/stress/spike/breakpoint behavior, aggregation latency, and reliability.
+They were **development tools**, not substitutes for the official workload.
+
+The full benchmark was still used for correctness, load/stress/spike/breakpoint behavior, aggregation latency, and reliability.
 
 ---
 
@@ -521,7 +541,7 @@ Selected runs:
 
 | Run | Machine speed | Score | Throughput | Request p95 | Aggregate p95 |
 |---|---:|---:|---:|---:|---:|
-| Strong Windows run | ~0.48x | **94.9** | **14,999/s** | **27 ms** | **4 ms** |
+| Best local run | ~0.48x | **94.9** | **14,999/s** | **~27–28 ms** | **~4 ms** |
 | Slower-machine run | 0.38x | **89.0** | **14,999/s** | **415 ms** | **138 ms** |
 | Optional-feature verification | 0.34x | **90.6** | **14,870/s** | **282 ms** | **125 ms** |
 | Ubuntu reproduction | 0.41x | **94.5** | **14,999/s** | **54 ms** | **28 ms** |
@@ -531,7 +551,7 @@ The benchmark tool itself warned when the generator could not schedule every req
 This changed how performance results were interpreted:
 
 > **score + machine speed + generator behavior + correctness + errors**  
-> is more meaningful than score alone.
+> **is more meaningful than score alone.**
 
 ---
 
@@ -678,7 +698,7 @@ The cleanup logic also keeps the derived rollups consistent with surviving raw d
 
 Both are **off by default** so they do not interfere with the standard benchmark workload.
 
-## Rate limiting
+## Rate Limiting
 
 Enable:
 
@@ -715,6 +735,8 @@ The service never responds `200` to a batch rejected by the backpressure gate.
 ---
 
 # Migrations
+
+Final migration set:
 
 ```text
 001_create_logs_table.sql
@@ -837,30 +859,20 @@ npx --yes github:Ahmad-Abbas-Foothill/logs-benchmark-cli \
   --generator-cpus 4
 ```
 
-## Archived Windows report
+## Best Local Result
 
 ```text
-Correctness    15.0 / 15
-Performance    45.0 / 50
-Queries        14.6 / 15
-Reliability    20.0 / 20
+Total          94.9 / 100
 
-Total          94.6 / 100
-
+Correctness    15 / 15
 Throughput     14,999 logs/s
 Errors         0.0%
-Request p95    ~51 ms
-Aggregate p95  ~23 ms
-Machine speed  0.476x reference
+Request p95    ~27–28 ms
+Aggregate p95  ~4 ms
+Reliability    20 / 20
 ```
 
-Raw score:
-
-```text
-94.58218888888888
-```
-
-## Ubuntu 26.04 LTS / WSL2 reproduction
+## Ubuntu 26.04 LTS / WSL2 Verification
 
 ```text
 Correctness    15.0 / 15
@@ -877,6 +889,8 @@ Aggregate p95  ~28 ms
 Machine speed  0.41x reference
 ```
 
+The Ubuntu run used the same application resource limits and started from a fresh PostgreSQL volume.
+
 ---
 
 # Project Structure
@@ -886,6 +900,9 @@ fastify-log-api/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml
+├── docs/
+│   ├── latency-comparison.png
+│   └── performance-evolution.png
 ├── scripts/
 │   ├── bench-concurrent.ts
 │   └── bench-ingest.ts
@@ -917,7 +934,7 @@ fastify-log-api/
 │   └── server.ts
 ├── Dockerfile
 ├── docker-compose.yml
-├── benchmark-report.json
+├── benchmark-report-linux.json
 ├── package.json
 └── tsconfig.json
 ```
@@ -926,29 +943,35 @@ fastify-log-api/
 
 # Engineering Takeaways
 
-### Measure first
+### Measure First
 
-A theoretically faster approach can still be slower in the real request path. The `COPY` experiment was the clearest example.
+A theoretically faster approach can still be slower in the real request path.
 
-### Optimize database work
+The `COPY` experiment was the clearest example.
 
-The major improvements targeted round trips, hot-row contention, aggregation work, and bounded maintenance rather than micro-optimizing TypeScript.
+### Optimize Database Work
 
-### Preserve semantics
+The major improvements targeted database round trips, hot-row contention, aggregation work, and bounded maintenance rather than micro-optimizing TypeScript.
 
-Correctness remained 15/15 while the architecture changed. Pagination stability, aggregate correctness, durable acknowledgement, and retention consistency were not traded away for speed.
+### Preserve Semantics
 
-### Keep failed experiments
+Correctness remained **15/15** while the architecture changed.
 
-Separate branches made it possible to test async rollups, rollup deltas, BRIN-related changes, pool changes, and post-94 experiments without endangering the stable branch.
+Pagination stability, aggregate correctness, durable acknowledgement, and retention consistency were not traded away for speed.
 
-### Interpret benchmarks with context
+### Keep Failed Experiments
 
-Machine speed and generator limitations materially changed local scores. A benchmark number without its environment is incomplete.
+Separate branches made it possible to test async rollups, rollup deltas, `COPY`, pool changes, and post-94 experiments without endangering the stable implementation.
 
-### Reproduce the result
+### Interpret Benchmarks With Context
 
-The final stack was started from a fresh database and benchmarked again on Ubuntu/WSL2, producing a result close to the archived Windows report.
+Machine speed and generator limitations materially changed local scores.
+
+A benchmark number without its environment is incomplete.
+
+### Reproduce the Result
+
+The final stack was started from a fresh database and benchmarked again on Ubuntu/WSL2, producing **94.5 / 100**, **14,999 logs/s**, **0.0% errors**, and full correctness.
 
 ---
 

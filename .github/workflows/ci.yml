@@ -1,0 +1,281 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Typecheck and Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+
+  smoke-default:
+    name: Default Mode Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start application
+        run: docker compose up --build -d
+
+      - name: Wait for health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8080/health; then
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          docker compose logs
+          exit 1
+
+      - name: Test POST /logs
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          STATUS=$(curl -sS \
+            -o response.json \
+            -w "%{http_code}" \
+            -X POST \
+            http://localhost:8080/logs \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"logs\": [
+                {
+                  \"timestamp\": \"$TIMESTAMP\",
+                  \"level\": \"info\",
+                  \"service\": \"ci-smoke-test\",
+                  \"message\": \"CI smoke test\",
+                  \"attributes\": {
+                    \"environment\": \"ci\"
+                  }
+                }
+              ]
+            }")
+
+          cat response.json
+          test "$STATUS" = "200"
+
+      - name: Test GET /logs
+        run: |
+          curl -fsS \
+            "http://localhost:8080/logs?service=ci-smoke-test&limit=10" \
+            > logs-response.json
+
+          cat logs-response.json
+
+          grep -q '"ci-smoke-test"' logs-response.json
+
+      - name: Test GET /logs/aggregate
+        run: |
+          SINCE=$(date -u -d "5 minutes ago" +"%Y-%m-%dT%H:%M:%SZ")
+          UNTIL=$(date -u -d "1 minute" +"%Y-%m-%dT%H:%M:%SZ")
+
+          curl -fsS \
+            "http://localhost:8080/logs/aggregate?since=${SINCE}&until=${UNTIL}&bucket=1m&service=ci-smoke-test" \
+            > aggregate-response.json
+
+          cat aggregate-response.json
+
+          grep -q '"count":1' aggregate-response.json
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop containers
+        if: always()
+        run: docker compose down -v
+
+
+  smoke-rate-limit:
+    name: Rate Limiting Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create rate-limit override
+        run: |
+          cat > docker-compose.rate-limit.yml <<'EOF'
+          services:
+            app:
+              environment:
+                RATE_LIMIT_REQUESTS_PER_SECOND: "1"
+          EOF
+
+      - name: Start application with rate limiting
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.rate-limit.yml \
+            up --build -d
+
+      - name: Wait for health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8080/health; then
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          docker compose logs
+          exit 1
+
+      - name: Verify HTTP 429
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          PAYLOAD="{
+            \"logs\": [
+              {
+                \"timestamp\": \"$TIMESTAMP\",
+                \"level\": \"info\",
+                \"service\": \"ci-rate-limit\",
+                \"message\": \"rate limit test\",
+                \"attributes\": {}
+              }
+            ]
+          }"
+
+          FOUND_429=0
+
+          for i in {1..5}; do
+            STATUS=$(curl -sS \
+              -o response.json \
+              -w "%{http_code}" \
+              -X POST \
+              http://localhost:8080/logs \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD")
+
+            echo "Request $i -> $STATUS"
+
+            if [ "$STATUS" = "429" ]; then
+              FOUND_429=1
+              break
+            fi
+          done
+
+          test "$FOUND_429" = "1"
+
+      - name: Stop containers
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.rate-limit.yml \
+            down -v
+
+
+  smoke-backpressure:
+    name: Backpressure Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create backpressure override
+        run: |
+          cat > docker-compose.backpressure.yml <<'EOF'
+          services:
+            app:
+              environment:
+                MAX_IN_FLIGHT_LOGS: "1"
+          EOF
+
+      - name: Start application with backpressure
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.backpressure.yml \
+            up --build -d
+
+      - name: Wait for health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8080/health; then
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          docker compose logs
+          exit 1
+
+      - name: Verify HTTP 503 and Retry-After
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          STATUS=$(curl -sS \
+            -D headers.txt \
+            -o response.json \
+            -w "%{http_code}" \
+            -X POST \
+            http://localhost:8080/logs \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"logs\": [
+                {
+                  \"timestamp\": \"$TIMESTAMP\",
+                  \"level\": \"info\",
+                  \"service\": \"ci-backpressure\",
+                  \"message\": \"backpressure test 1\",
+                  \"attributes\": {}
+                },
+                {
+                  \"timestamp\": \"$TIMESTAMP\",
+                  \"level\": \"info\",
+                  \"service\": \"ci-backpressure\",
+                  \"message\": \"backpressure test 2\",
+                  \"attributes\": {}
+                }
+              ]
+            }")
+
+          cat headers.txt
+          cat response.json
+
+          test "$STATUS" = "503"
+          grep -qi "^retry-after:" headers.txt
+
+      - name: Stop containers
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.backpressure.yml \
+            down -v
